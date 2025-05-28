@@ -1,82 +1,225 @@
 import pybullet as p
-import pybullet_data
-import time
 import numpy as np
+import time
+import pybullet_data
 
-# 初始化
-p.connect(p.GUI)
+# 连接物理引擎
+physicsClient = p.connect(p.GUI)
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.setGravity(0, 0, -9.81)
 
-# 加载环境
-p.loadURDF("plane.urdf")
-robot_id = p.loadURDF("franka_panda/panda.urdf", [0, 0, 0], useFixedBase=True)
-cube_id = p.loadURDF("cube.urdf", [0.6, 0, 0.02], globalScaling=0.1)
+# 加载环境和机器人
+planeId = p.loadURDF("plane.urdf")
+pandaId = p.loadURDF("franka_panda/panda.urdf", [0, 0, 0], useFixedBase=True)
+tableId = p.loadURDF("table/table.urdf", [0.5, 0, -0.65])
+objectId = p.loadURDF("cube.urdf", [0.6, 0, 0.02], globalScaling=0.05)
 
-# 参数
-ee_index = 11  # panda_hand
-finger_links = [9, 10]  # 左右夹爪链接索引
-gripper_open = 0.04
-gripper_close = 0.0
-target_orn = p.getQuaternionFromEuler([np.pi, 0, 0])
+# 改进物体属性以提高抓取成功率
+p.changeDynamics(objectId, -1, mass=0.1)
+p.changeDynamics(objectId, -1, lateralFriction=1.0)
+p.changeDynamics(objectId, -1, spinningFriction=0.1)
 
-# 夹爪控制函数
-def control_gripper(opening, force=500):
-    p.setJointMotorControl2(robot_id, 9, p.POSITION_CONTROL, targetPosition=opening, force=force)
-    p.setJointMotorControl2(robot_id, 10, p.POSITION_CONTROL, targetPosition=opening, force=force)
+# 设置关节初始位置 - 使用更合理的初始姿态
+p.resetJointState(pandaId, 0, -0.785)  # 基关节旋转
+p.resetJointState(pandaId, 1, -0.785)  # 肩部关节
+p.resetJointState(pandaId, 2, 0.785)   # 肘部关节
+p.resetJointState(pandaId, 3, -1.57)   # 腕部关节
+p.resetJointState(pandaId, 4, -0.785)  # 腕部关节2
+p.resetJointState(pandaId, 5, 1.57)    # 腕部关节3
+p.resetJointState(pandaId, 6, 0.785)   # 末端执行器旋转
 
-# 移动末端到指定位置
-def move_to(position, orn, steps=100):
-    joint_poses = p.calculateInverseKinematics(robot_id, ee_index, position, orn)
-    for _ in range(steps):
-        for j in range(7):  # Panda 机械臂的7个关节
-            p.setJointMotorControl2(robot_id, j, p.POSITION_CONTROL, targetPosition=joint_poses[j], force=1000)
-        p.stepSimulation()
-        time.sleep(1/240)
+# 获取末端执行器ID
+end_effector_id = 11
 
-# 抓取过程
-control_gripper(gripper_open)                           # 打开夹爪
-move_to([0.6, 0, 0.25], target_orn)                     # 移动到物体上方
-move_to([0.6, 0, 0.035], target_orn)                    # 慢慢下降（物体高度大约 0.04）
-control_gripper(gripper_close)                          # 闭合夹爪
+# 修正目标位置 - 考虑末端执行器偏移
+tool_offset = 0.0  # 末端执行器从腕部关节的偏移距离
+target_position = [0.6 - tool_offset, 0, 0.1]  # 补偿工具偏移
+target_orientation = p.getQuaternionFromEuler([np.pi, 0, 0])
 
-# 等待夹紧
+# 可视化目标位置和物体位置
+def visualize_position(pos, color, text=None):
+    p.addUserDebugLine(
+        [pos[0]-0.02, pos[1], pos[2]],
+        [pos[0]+0.02, pos[1], pos[2]],
+        lineColorRGB=color,
+        lineWidth=2,
+        lifeTime=0
+    )
+    p.addUserDebugLine(
+        [pos[0], pos[1]-0.02, pos[2]],
+        [pos[0], pos[1]+0.02, pos[2]],
+        lineColorRGB=color,
+        lineWidth=2,
+        lifeTime=0
+    )
+    p.addUserDebugLine(
+        [pos[0], pos[1], pos[2]-0.02],
+        [pos[0], pos[1], pos[2]+0.02],
+        lineColorRGB=color,
+        lineWidth=2,
+        lifeTime=0
+    )
+    if text:
+        p.addUserDebugText(text, [pos[0], pos[1], pos[2]+0.03],
+                          textColorRGB=color, textSize=1, lifeTime=0)
+
+visualize_position([0.6, 0, 0.02], [1, 0, 0], "物体位置")
+visualize_position(target_position, [0, 1, 0], "目标位置")
+
+# 生成轨迹点
+num_points = 20
+waypoints = []
+start_position = p.getLinkState(pandaId, end_effector_id)[0]
+
+for i in range(num_points + 1):
+    alpha = i / num_points
+    position = [
+        start_position[0] + alpha * (target_position[0] - start_position[0]),
+        start_position[1] + alpha * (target_position[1] - start_position[1]),
+        start_position[2] + alpha * (target_position[2] - start_position[2])
+    ]
+    waypoints.append((position, target_orientation))
+
+# 执行轨迹
+for position, orientation in waypoints:
+    # 计算逆运动学 - 增加关节阻尼参数
+    joint_angles = p.calculateInverseKinematics(
+        pandaId, end_effector_id, position, orientation,
+        lowerLimits=[-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+        upperLimits=[2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+        jointRanges=[5.7946, 3.5256, 5.7946, 3.002, 5.7946, 3.77, 5.7946],
+        restPoses=[0, -0.785, 0.785, -1.57, -0.785, 1.57, 0.785],
+        jointDamping=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    )
+    
+    # 设置关节角度
+    for i in range(7):
+        p.setJointMotorControl2(
+            pandaId, i, p.POSITION_CONTROL, 
+            targetPosition=joint_angles[i], 
+            force=500
+        )
+    
+    # 实时显示末端执行器位置
+    ee_state = p.getLinkState(pandaId, end_effector_id)
+    ee_pos = ee_state[0]
+    p.addUserDebugLine(
+        [ee_pos[0]-0.01, ee_pos[1], ee_pos[2]],
+        [ee_pos[0]+0.01, ee_pos[1], ee_pos[2]],
+        lineColorRGB=[1, 1, 0],
+        lineWidth=1,
+        lifeTime=0.1
+    )
+    
+    p.stepSimulation()
+    time.sleep(0.01)
+
+# 改进的抓取流程
+grab_position = [0.6 - tool_offset, 0, 0.02]  # 补偿工具偏移
+grab_orientation = target_orientation
+
+visualize_position(grab_position, [0, 0, 1], "抓取位置")
+
+for i in range(num_points + 1):
+    alpha = i / num_points
+    position = [
+        target_position[0] + alpha * (grab_position[0] - target_position[0]),
+        target_position[1] + alpha * (grab_position[1] - target_position[1]),
+        target_position[2] + alpha * (grab_position[2] - target_position[2])
+    ]
+    
+    joint_angles = p.calculateInverseKinematics(
+        pandaId, end_effector_id, position, grab_orientation,
+        lowerLimits=[-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+        upperLimits=[2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+        jointRanges=[5.7946, 3.5256, 5.7946, 3.002, 5.7946, 3.77, 5.7946],
+        restPoses=[0, -0.785, 0.785, -1.57, -0.785, 1.57, 0.785],
+        jointDamping=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    )
+    
+    for i in range(7):
+        p.setJointMotorControl2(
+            pandaId, i, p.POSITION_CONTROL, 
+            targetPosition=joint_angles[i], 
+            force=500
+        )
+    
+    # 显示实时位置和目标位置的误差
+    ee_state = p.getLinkState(pandaId, end_effector_id)
+    ee_pos = ee_state[0]
+    error = np.sqrt(
+        (ee_pos[0] - position[0])**2 + 
+        (ee_pos[1] - position[1])**2 + 
+        (ee_pos[2] - position[2])**2
+    )
+    p.addUserDebugText(
+        f"误差: {error:.4f}m", 
+        [ee_pos[0], ee_pos[1], ee_pos[2]+0.03],
+        textColorRGB=[1, 1, 0], 
+        textSize=0.8, 
+        lifeTime=0.1
+    )
+    
+    p.stepSimulation()
+    time.sleep(0.01)
+
+# 关闭夹爪
+for i in range(2):
+    p.setJointMotorControl2(
+        pandaId, 9 + i, p.POSITION_CONTROL, 
+        targetPosition=0.003, 
+        force=100
+    )
+
 for _ in range(100):
     p.stepSimulation()
-    time.sleep(1/240)
+    time.sleep(0.01)
 
-# 检查两个夹爪是否接触物体
-has_contact = False
-for link in finger_links:
-    if p.getContactPoints(robot_id, cube_id, linkIndexA=link):
-        has_contact = True
-        break
+# 检查是否成功抓取
+def check_grasp_success():
+    contact_points = p.getContactPoints(pandaId, objectId)
+    return len(contact_points) > 0
 
-# 如果成功接触，创建夹持约束
-if has_contact:
-    print("✅ 抓取成功！")
-    p.createConstraint(
-        parentBodyUniqueId=robot_id,
-        parentLinkIndex=ee_index,
-        childBodyUniqueId=cube_id,
-        childLinkIndex=-1,
-        jointType=p.JOINT_FIXED,
-        jointAxis=[0, 0, 0],
-        parentFramePosition=[0, 0, 0],
-        childFramePosition=[0, 0, 0]
+is_grasp_successful = check_grasp_success()
+print(f"抓取状态: {'成功' if is_grasp_successful else '失败'}")
+
+# 提升物体
+lift_position = [0.6 - tool_offset, 0, 0.3]
+lift_orientation = target_orientation
+
+slow_num_points = 30
+for i in range(slow_num_points + 1):
+    alpha = i / slow_num_points
+    position = [
+        grab_position[0] + alpha * (lift_position[0] - grab_position[0]),
+        grab_position[1] + alpha * (lift_position[1] - grab_position[1]),
+        grab_position[2] + alpha * (lift_position[2] - grab_position[2])
+    ]
+    
+    joint_angles = p.calculateInverseKinematics(
+        pandaId, end_effector_id, position, lift_orientation,
+        lowerLimits=[-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+        upperLimits=[2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+        jointRanges=[5.7946, 3.5256, 5.7946, 3.002, 5.7946, 3.77, 5.7946],
+        restPoses=[0, -0.785, 0.785, -1.57, -0.785, 1.57, 0.785],
+        jointDamping=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     )
-else:
-    print("❌ 抓取失败")
-
-# 抬起物体
-move_to([0.6, 0, 0.25], target_orn)
-
-# 观察一段时间
-for _ in range(240):
+    
+    for i in range(7):
+        p.setJointMotorControl2(
+            pandaId, i, p.POSITION_CONTROL, 
+            targetPosition=joint_angles[i], 
+            maxVelocity=0.1,
+            force=500
+        )
+    
     p.stepSimulation()
-    time.sleep(1/240)
+    time.sleep(0.02)
 
+is_grasp_successful_after_lift = check_grasp_success()
+print(f"提升后抓取状态: {'成功' if is_grasp_successful_after_lift else '失败'}")
 
-input("Press Enter to exit...")
-
-p.disconnect()
+# 保持仿真运行
+while True:
+    p.stepSimulation()
+    time.sleep(0.01)

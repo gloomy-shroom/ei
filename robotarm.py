@@ -3,7 +3,7 @@ import numpy as np
 import time
 import pybullet_data
 
-# 连接物理引擎
+
 physicsClient = p.connect(p.GUI)
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.setGravity(0, 0, -9.81)
@@ -36,37 +36,7 @@ tool_offset = 0.0  # 末端执行器从腕部关节的偏移距离
 target_position = [0.6 - tool_offset, 0, 0.1]  # 补偿工具偏移
 target_orientation = p.getQuaternionFromEuler([np.pi, 0, 0])
 
-# 可视化目标位置和物体位置
-def visualize_position(pos, color, text=None):
-    p.addUserDebugLine(
-        [pos[0]-0.02, pos[1], pos[2]],
-        [pos[0]+0.02, pos[1], pos[2]],
-        lineColorRGB=color,
-        lineWidth=2,
-        lifeTime=0
-    )
-    p.addUserDebugLine(
-        [pos[0], pos[1]-0.02, pos[2]],
-        [pos[0], pos[1]+0.02, pos[2]],
-        lineColorRGB=color,
-        lineWidth=2,
-        lifeTime=0
-    )
-    p.addUserDebugLine(
-        [pos[0], pos[1], pos[2]-0.02],
-        [pos[0], pos[1], pos[2]+0.02],
-        lineColorRGB=color,
-        lineWidth=2,
-        lifeTime=0
-    )
-    if text:
-        p.addUserDebugText(text, [pos[0], pos[1], pos[2]+0.03],
-                          textColorRGB=color, textSize=1, lifeTime=0)
-
-visualize_position([0.6, 0, 0.02], [1, 0, 0], "物体位置")
-visualize_position(target_position, [0, 1, 0], "目标位置")
-
-# 生成轨迹点
+# 生成轨迹点（删除可视化调用）
 num_points = 20
 waypoints = []
 start_position = p.getLinkState(pandaId, end_effector_id)[0]
@@ -80,9 +50,8 @@ for i in range(num_points + 1):
     ]
     waypoints.append((position, target_orientation))
 
-# 执行轨迹
+# 执行轨迹（删除调试线条）
 for position, orientation in waypoints:
-    # 计算逆运动学 - 增加关节阻尼参数
     joint_angles = p.calculateInverseKinematics(
         pandaId, end_effector_id, position, orientation,
         lowerLimits=[-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
@@ -92,7 +61,6 @@ for position, orientation in waypoints:
         jointDamping=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
     )
     
-    # 设置关节角度
     for i in range(7):
         p.setJointMotorControl2(
             pandaId, i, p.POSITION_CONTROL, 
@@ -100,25 +68,12 @@ for position, orientation in waypoints:
             force=500
         )
     
-    # 实时显示末端执行器位置
-    ee_state = p.getLinkState(pandaId, end_effector_id)
-    ee_pos = ee_state[0]
-    p.addUserDebugLine(
-        [ee_pos[0]-0.01, ee_pos[1], ee_pos[2]],
-        [ee_pos[0]+0.01, ee_pos[1], ee_pos[2]],
-        lineColorRGB=[1, 1, 0],
-        lineWidth=1,
-        lifeTime=0.1
-    )
-    
     p.stepSimulation()
     time.sleep(0.01)
 
-# 改进的抓取流程
+# 改进的抓取流程（删除抓取位置可视化）
 grab_position = [0.6 - tool_offset, 0, 0.02]  # 补偿工具偏移
 grab_orientation = target_orientation
-
-visualize_position(grab_position, [0, 0, 1], "抓取位置")
 
 for i in range(num_points + 1):
     alpha = i / num_points
@@ -144,22 +99,6 @@ for i in range(num_points + 1):
             force=500
         )
     
-    # 显示实时位置和目标位置的误差
-    ee_state = p.getLinkState(pandaId, end_effector_id)
-    ee_pos = ee_state[0]
-    error = np.sqrt(
-        (ee_pos[0] - position[0])**2 + 
-        (ee_pos[1] - position[1])**2 + 
-        (ee_pos[2] - position[2])**2
-    )
-    p.addUserDebugText(
-        f"误差: {error:.4f}m", 
-        [ee_pos[0], ee_pos[1], ee_pos[2]+0.03],
-        textColorRGB=[1, 1, 0], 
-        textSize=0.8, 
-        lifeTime=0.1
-    )
-    
     p.stepSimulation()
     time.sleep(0.01)
 
@@ -183,7 +122,7 @@ def check_grasp_success():
 is_grasp_successful = check_grasp_success()
 print(f"抓取状态: {'成功' if is_grasp_successful else '失败'}")
 
-# 提升物体
+# 提升物体（删除调试文字）
 lift_position = [0.6 - tool_offset, 0, 0.3]
 lift_orientation = target_orientation
 
